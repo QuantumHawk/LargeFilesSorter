@@ -225,7 +225,8 @@ public class BlockLineReaderTests
     private static string WriteTempFile(string content, System.Text.Encoding? enc = null)
     {
         string path = Path.GetTempFileName();
-        File.WriteAllText(path, content, enc ?? System.Text.Encoding.UTF8);
+        // Use no-BOM UTF-8 by default so BlockLineReader doesn't see the BOM as content
+        File.WriteAllText(path, content, enc ?? new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
         return path;
     }
 
