@@ -20,7 +20,7 @@ echo ""
 
 # ── Step 1: Generate test file ─────────────────────────────────────────────
 echo "[1/4] Generating ${FILE_SIZE_MB} MB test file..."
-/app/LargeFileGenerator "$INPUT_FILE" --size-mb "$FILE_SIZE_MB"
+/app/LargeFileGenerator "$INPUT_FILE" "$FILE_SIZE_MB"
 ACTUAL_SIZE=$(du -sh "$INPUT_FILE" | cut -f1)
 echo "      Generated: $ACTUAL_SIZE"
 
