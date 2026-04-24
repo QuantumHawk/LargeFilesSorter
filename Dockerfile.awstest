@@ -1,0 +1,53 @@
+# --- Build stage ---
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+
+COPY LargeFilesSorter.sln .
+COPY Common/Common.csproj              Common/
+COPY LargeFileSort/LargeFileSort.csproj LargeFileSort/
+COPY LargeFileGenerator/LargeFileGenerator.csproj LargeFileGenerator/
+COPY LargeFileSort.Tests/LargeFileSort.Tests.csproj LargeFileSort.Tests/
+
+RUN dotnet restore LargeFilesSorter.sln
+
+COPY . .
+
+# Publish sorter
+RUN dotnet restore LargeFileSort/LargeFileSort.csproj -r linux-x64
+RUN dotnet publish LargeFileSort/LargeFileSort.csproj \
+    -c Release -o /app/publish/sort \
+    --no-restore -r linux-x64 --self-contained true \
+    /p:PublishSingleFile=true /p:PublishTrimmed=false
+
+# Publish generator
+RUN dotnet restore LargeFileGenerator/LargeFileGenerator.csproj -r linux-x64
+RUN dotnet publish LargeFileGenerator/LargeFileGenerator.csproj \
+    -c Release -o /app/publish/gen \
+    --no-restore -r linux-x64 --self-contained true \
+    /p:PublishSingleFile=true /p:PublishTrimmed=false
+
+# --- Runtime stage ---
+FROM ubuntu:24.04 AS runtime
+WORKDIR /app
+
+# Install AWS CLI v2 and utilities
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl unzip ca-certificates && \
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscli.zip && \
+    unzip -q /tmp/awscli.zip -d /tmp && \
+    /tmp/aws/install && \
+    rm -rf /tmp/awscli.zip /tmp/aws && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /app/publish/sort/LargeFileSort       /app/LargeFileSort
+COPY --from=build /app/publish/gen/LargeFileGenerator   /app/LargeFileGenerator
+COPY scripts/aws-integration-test.sh                    /app/aws-integration-test.sh
+
+RUN chmod +x /app/LargeFileSort /app/LargeFileGenerator /app/aws-integration-test.sh && \
+    mkdir -p /tmp/sort-work
+
+RUN useradd -m testuser && chown -R testuser /app /tmp/sort-work
+USER testuser
+
+ENTRYPOINT ["/app/aws-integration-test.sh"]
+

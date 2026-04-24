@@ -1,0 +1,162 @@
+name: AWS Integration Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_size_mb:
+        description: 'Test file size in MB (e.g. 1024 = 1GB, 102400 = 100GB)'
+        required: true
+        default: '1024'
+      chunk_size_mb:
+        description: 'Chunk size for sorter in MB'
+        required: false
+        default: '512'
+      merge_fan_in:
+        description: 'Merge fan-in (number of chunks merged at once)'
+        required: false
+        default: '32'
+
+env:
+  AWS_REGION:       us-east-1
+  ECR_REPOSITORY:   large-file-sorter-test
+  ECS_CLUSTER:      large-file-sorter-cluster
+  TASK_FAMILY:      large-file-sorter-integration-test
+  CONTAINER_NAME:   large-file-sorter-test
+  S3_BUCKET:        large-file-sorter-test-${{ github.repository_owner }}
+
+jobs:
+  run-aws-integration-test:
+    name: Generate, sort & verify on AWS
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── Build & push the integration test image ───────────────────────────
+      - name: Build & push test image
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG:    ${{ github.sha }}
+        run: |
+          # Ensure ECR repo exists
+          aws ecr describe-repositories --repository-names $ECR_REPOSITORY \
+            || aws ecr create-repository --repository-name $ECR_REPOSITORY
+
+          docker build -f Dockerfile.awstest \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      # ── Ensure S3 bucket exists ───────────────────────────────────────────
+      - name: Ensure S3 bucket exists
+        run: |
+          aws s3api head-bucket --bucket ${{ env.S3_BUCKET }} 2>/dev/null \
+            || aws s3api create-bucket --bucket ${{ env.S3_BUCKET }} --region ${{ env.AWS_REGION }}
+
+      # ── Register ECS task definition for the integration test ─────────────
+      - name: Register task definition
+        id: register-task
+        run: |
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --family ${{ env.TASK_FAMILY }} \
+            --network-mode awsvpc \
+            --requires-compatibilities FARGATE \
+            --cpu 4096 \
+            --memory 16384 \
+            --execution-role-arn arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/ecsTaskExecutionRole \
+            --task-role-arn      arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/ecsTaskRole \
+            --container-definitions "[{
+              \"name\": \"${{ env.CONTAINER_NAME }}\",
+              \"image\": \"${{ steps.build-image.outputs.image }}\",
+              \"essential\": true,
+              \"environment\": [
+                {\"name\": \"S3_BUCKET\",      \"value\": \"${{ env.S3_BUCKET }}\"},
+                {\"name\": \"FILE_SIZE_MB\",   \"value\": \"${{ inputs.file_size_mb }}\"},
+                {\"name\": \"CHUNK_SIZE_MB\",  \"value\": \"${{ inputs.chunk_size_mb }}\"},
+                {\"name\": \"MERGE_FAN_IN\",   \"value\": \"${{ inputs.merge_fan_in }}\"}
+              ],
+              \"logConfiguration\": {
+                \"logDriver\": \"awslogs\",
+                \"options\": {
+                  \"awslogs-group\": \"/ecs/large-file-sorter-test\",
+                  \"awslogs-region\": \"${{ env.AWS_REGION }}\",
+                  \"awslogs-stream-prefix\": \"ecs\",
+                  \"awslogs-create-group\": \"true\"
+                }
+              }
+            }]" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "task_def_arn=$TASK_DEF_ARN" >> $GITHUB_OUTPUT
+
+      # ── Run the ECS task and wait for completion ──────────────────────────
+      - name: Run ECS integration test task
+        id: run-task
+        run: |
+          TASK_ARN=$(aws ecs run-task \
+            --cluster   ${{ env.ECS_CLUSTER }} \
+            --task-definition ${{ steps.register-task.outputs.task_def_arn }} \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ secrets.SUBNET_ID }}],securityGroups=[${{ secrets.SECURITY_GROUP_ID }}],assignPublicIp=ENABLED}" \
+            --query 'tasks[0].taskArn' \
+            --output text)
+          echo "task_arn=$TASK_ARN" >> $GITHUB_OUTPUT
+          echo "Task ARN: $TASK_ARN"
+
+      - name: Wait for task to complete
+        run: |
+          TASK_ARN="${{ steps.run-task.outputs.task_arn }}"
+          echo "Waiting for task to finish (this may take a long time for large files)..."
+
+          aws ecs wait tasks-stopped \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --tasks "$TASK_ARN"
+
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --tasks "$TASK_ARN" \
+            --query 'tasks[0].containers[0].exitCode' \
+            --output text)
+
+          echo "Task exit code: $EXIT_CODE"
+
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "Task FAILED with exit code $EXIT_CODE"
+            echo "Check CloudWatch logs: /ecs/large-file-sorter-test"
+            exit 1
+          fi
+
+      # ── Print CloudWatch logs ─────────────────────────────────────────────
+      - name: Print task logs
+        if: always()
+        run: |
+          TASK_ID=$(echo "${{ steps.run-task.outputs.task_arn }}" | awk -F/ '{print $NF}')
+          echo "=== CloudWatch Logs ==="
+          aws logs get-log-events \
+            --log-group-name /ecs/large-file-sorter-test \
+            --log-stream-name "ecs/${{ env.CONTAINER_NAME }}/$TASK_ID" \
+            --query 'events[*].message' \
+            --output text 2>/dev/null || echo "(logs not available yet)"
+
+      # ── Show S3 output info ───────────────────────────────────────────────
+      - name: Show S3 results
+        if: success()
+        run: |
+          echo "=== S3 Output ==="
+          aws s3 ls s3://${{ env.S3_BUCKET }}/output/ --human-readable
+
