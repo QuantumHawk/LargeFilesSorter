@@ -17,14 +17,16 @@ RUN dotnet restore LargeFileSort/LargeFileSort.csproj -r linux-x64
 RUN dotnet publish LargeFileSort/LargeFileSort.csproj \
     -c Release -o /app/publish/sort \
     --no-restore -r linux-x64 --self-contained true \
-    /p:PublishSingleFile=true /p:PublishTrimmed=false
+    /p:PublishSingleFile=true /p:PublishTrimmed=false \
+    /p:InvariantGlobalization=true
 
 # Publish generator
 RUN dotnet restore LargeFileGenerator/LargeFileGenerator.csproj -r linux-x64
 RUN dotnet publish LargeFileGenerator/LargeFileGenerator.csproj \
     -c Release -o /app/publish/gen \
     --no-restore -r linux-x64 --self-contained true \
-    /p:PublishSingleFile=true /p:PublishTrimmed=false
+    /p:PublishSingleFile=true /p:PublishTrimmed=false \
+    /p:InvariantGlobalization=true
 
 # --- Runtime stage ---
 FROM ubuntu:24.04 AS runtime

@@ -22,7 +22,8 @@ RUN dotnet publish LargeFileSort/LargeFileSort.csproj \
     -r linux-x64 \
     --self-contained true \
     /p:PublishSingleFile=true \
-    /p:PublishTrimmed=false
+    /p:PublishTrimmed=false \
+    /p:InvariantGlobalization=true
 
 # --- Runtime stage ---
 FROM mcr.microsoft.com/dotnet/runtime-deps:10.0 AS runtime
