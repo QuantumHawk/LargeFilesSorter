@@ -13,6 +13,8 @@ RUN dotnet restore LargeFilesSorter.sln
 
 # Copy everything else and publish
 COPY . .
+# Restore again with the target RID so the assets file includes linux-x64
+RUN dotnet restore LargeFileSort/LargeFileSort.csproj -r linux-x64
 RUN dotnet publish LargeFileSort/LargeFileSort.csproj \
     -c Release \
     -o /app/publish \
