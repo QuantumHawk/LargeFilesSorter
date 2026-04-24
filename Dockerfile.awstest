@@ -32,7 +32,7 @@ WORKDIR /app
 
 # Install AWS CLI v2 and utilities
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl unzip ca-certificates && \
+        curl unzip ca-certificates libicu74 && \
     curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscli.zip && \
     unzip -q /tmp/awscli.zip -d /tmp && \
     /tmp/aws/install && \
