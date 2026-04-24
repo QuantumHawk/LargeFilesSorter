@@ -1,0 +1,11 @@
+C:\Users\s.yastrebova-dt\Desktop\Altium\Common\bin\Debug\net10.0\Common.deps.json
+C:\Users\s.yastrebova-dt\Desktop\Altium\Common\bin\Debug\net10.0\Common.dll
+C:\Users\s.yastrebova-dt\Desktop\Altium\Common\bin\Debug\net10.0\Common.pdb
+C:\Users\s.yastrebova-dt\Desktop\Altium\Common\obj\Debug\net10.0\Common.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\s.yastrebova-dt\Desktop\Altium\Common\obj\Debug\net10.0\Common.AssemblyInfoInputs.cache
+C:\Users\s.yastrebova-dt\Desktop\Altium\Common\obj\Debug\net10.0\Common.AssemblyInfo.cs
+C:\Users\s.yastrebova-dt\Desktop\Altium\Common\obj\Debug\net10.0\Common.csproj.CoreCompileInputs.cache
+C:\Users\s.yastrebova-dt\Desktop\Altium\Common\obj\Debug\net10.0\Common.dll
+C:\Users\s.yastrebova-dt\Desktop\Altium\Common\obj\Debug\net10.0\refint\Common.dll
+C:\Users\s.yastrebova-dt\Desktop\Altium\Common\obj\Debug\net10.0\Common.pdb
+C:\Users\s.yastrebova-dt\Desktop\Altium\Common\obj\Debug\net10.0\ref\Common.dll

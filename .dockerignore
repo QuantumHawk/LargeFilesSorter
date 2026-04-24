@@ -1,0 +1,9 @@
+.dockerignore
+**/bin/
+**/obj/
+**/*.user
+.git/
+.github/
+*.md
+data.txt
+sorted.txt
