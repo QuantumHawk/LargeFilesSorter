@@ -22,7 +22,7 @@ env:
   ECS_CLUSTER:      large-file-sorter-cluster
   TASK_FAMILY:      large-file-sorter-integration-test
   CONTAINER_NAME:   large-file-sorter-test
-  S3_BUCKET:        large-file-sorter-test-${{ github.repository_owner }}
+  S3_BUCKET:        large-file-sorter-test-quantumhawk
 
 jobs:
   run-aws-integration-test:
@@ -52,9 +52,8 @@ jobs:
           IMAGE_TAG:    ${{ github.sha }}
         run: |
           # Ensure ECR repo exists
-          aws ecr describe-repositories --repository-names $ECR_REPOSITORY \
-            || aws ecr create-repository --repository-name $ECR_REPOSITORY
-
+          aws ecr create-repository --repository-name $ECR_REPOSITORY 2>/dev/null || true
+  
           docker build -f Dockerfile.awstest \
             -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
             -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
