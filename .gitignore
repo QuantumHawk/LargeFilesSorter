@@ -1,0 +1,18 @@
+# Large test data files
+*.txt
+!**/*.md
+
+# Build output
+**/bin/
+**/obj/
+
+# Rider / VS
+.idea/
+.vs/
+**/*.user
+**/*.suo
+
+# Temp / sort output
+*.tmp
+*.bin
+
