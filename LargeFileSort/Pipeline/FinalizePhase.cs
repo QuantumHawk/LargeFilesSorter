@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using Common;
+using LargeFileSorter.Telemetry;
 
 namespace LargeFileSorter
 {
@@ -27,6 +28,7 @@ namespace LargeFileSorter
 
         public void Execute(string binaryChunkPath, string textOutputPath)
         {
+            using var activity   = SorterTelemetry.ActivitySource.StartActivity("sort.finalize");
             long linesWritten = 0;
             var  started      = Stopwatch.StartNew();
 
@@ -62,6 +64,13 @@ namespace LargeFileSorter
 
             long totalBytes = outputStream.Position;
             _metrics.AddOutputBytes(totalBytes);
+
+            // ── OTel metrics ─────────────────────────────────────────────────────
+            SorterTelemetry.FinalizePhaseDuration.Record(started.Elapsed.TotalSeconds);
+            SorterTelemetry.LinesWritten.Add(linesWritten);
+            SorterTelemetry.OutputBytesWritten.Add(totalBytes);
+            activity?.SetTag("lines_written",  linesWritten);
+            activity?.SetTag("output_bytes",   totalBytes);
 
             _progress.Report(
                 $"done: lines={linesWritten:n0}, output≈{ProgressReporter.FormatBytes(totalBytes)}",

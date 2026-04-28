@@ -1,4 +1,5 @@
 ﻿using Common;
+using LargeFileSorter.Telemetry;
 
 namespace LargeFileSorter
 {
@@ -6,6 +7,9 @@ namespace LargeFileSorter
     {
         static int Main(string[] args)
         {
+            // Start OpenTelemetry — disposed at the end of Main to flush all spans/metrics.
+            using var otel = TelemetrySetup.Configure();
+
             try
             {
                 if (args.Length == 0 || HasHelp(args))

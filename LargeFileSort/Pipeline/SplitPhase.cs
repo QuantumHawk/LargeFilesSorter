@@ -1,7 +1,9 @@
+using System.Diagnostics;
 using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Threading.Channels;
 using Common;
+using LargeFileSorter.Telemetry;
 
 namespace LargeFileSorter
 {
@@ -46,6 +48,9 @@ namespace LargeFileSorter
 
         public List<string> Execute()
         {
+            using var activity   = SorterTelemetry.ActivitySource.StartActivity("sort.split");
+            var       phaseWatch = Stopwatch.StartNew();
+
             long targetChunkBytes = _options.EffectiveChunkSizeBytes;
             var  chunkPaths       = new List<string>();
             var  chunkPathsLock   = new object();
@@ -220,7 +225,11 @@ namespace LargeFileSorter
                             await foreach (SortChunk chunk in channel.Reader
                                 .ReadAllAsync(cts.Token).ConfigureAwait(false))
                             {
+                                var chunkSortWatch = Stopwatch.StartNew();
                                 chunk.Records.Sort(RecordComparer.Instance);
+                                SorterTelemetry.ChunkSortDuration.Record(
+                                    chunkSortWatch.Elapsed.TotalSeconds,
+                                    new TagList { { "chunk_index", chunk.ChunkIndex } });
 
                                 string chunkPath = Path.Combine(
                                     _options.TempDirectory,
@@ -282,6 +291,18 @@ namespace LargeFileSorter
                 }
 
                 chunkPaths.Sort(StringComparer.Ordinal);
+
+                // ── Emit end-of-phase OTel metrics ───────────────────────────────
+                var snapshot = _metrics.Snapshot;
+                SorterTelemetry.SplitPhaseDuration.Record(phaseWatch.Elapsed.TotalSeconds);
+                SorterTelemetry.ValidLines.Add(snapshot.ValidLines);
+                SorterTelemetry.InvalidLines.Add(snapshot.InvalidLines);
+                SorterTelemetry.ChunksCreated.Add(chunkPaths.Count);
+                SorterTelemetry.InputBytesRead.Add(snapshot.InputBytesRead);
+                activity?.SetTag("chunks",       chunkPaths.Count);
+                activity?.SetTag("valid_lines",  snapshot.ValidLines);
+                activity?.SetTag("invalid_lines",snapshot.InvalidLines);
+                activity?.SetTag("input_bytes",  snapshot.InputBytesRead);
 
                 _progress.Report(
                     $"split done: chunks={chunkPaths.Count}, " +

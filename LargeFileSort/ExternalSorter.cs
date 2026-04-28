@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using Common;
+using LargeFileSorter.Telemetry;
 
 namespace LargeFileSorter
 {
@@ -31,6 +33,13 @@ namespace LargeFileSorter
 
         public void Sort()
         {
+            using var rootActivity = SorterTelemetry.ActivitySource.StartActivity("sort");
+            rootActivity?.SetTag("input.path",     _options.InputPath);
+            rootActivity?.SetTag("output.path",    _options.OutputPath);
+            rootActivity?.SetTag("chunk_size_mb",  _options.ChunkSizeMb);
+            rootActivity?.SetTag("merge_fan_in",   _options.MergeFanIn);
+            rootActivity?.SetTag("max_parallel_chunk_sorters", _options.MaxParallelChunkSorters);
+
             ValidateOptions();
 
             Directory.CreateDirectory(_options.TempDirectory);
@@ -124,6 +133,9 @@ namespace LargeFileSorter
             catch
             {
                 TryDeleteFile(finalTempOutput);
+
+                // Record the error on the root span so it shows as failed in the trace backend.
+                rootActivity?.SetStatus(ActivityStatusCode.Error);
 
                 if (!string.IsNullOrWhiteSpace(_options.MetricsPath))
                 {

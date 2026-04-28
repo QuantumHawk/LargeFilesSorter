@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using Common;
+using LargeFileSorter.Telemetry;
 
 namespace LargeFileSorter
 {
@@ -37,6 +39,8 @@ namespace LargeFileSorter
 
         public string Execute(List<string> initialChunks, SortManifest manifest)
         {
+            using var activity   = SorterTelemetry.ActivitySource.StartActivity("sort.merge");
+            var       phaseWatch = Stopwatch.StartNew();
             if (initialChunks.Count == 0)
             {
                 string emptyChunk = CreateEmptyChunk();
@@ -148,6 +152,13 @@ namespace LargeFileSorter
 
                 currentFiles = nextFiles;
             }
+
+            // ── Emit end-of-phase OTel metrics ───────────────────────────────────
+            SorterTelemetry.MergePhaseDuration.Record(phaseWatch.Elapsed.TotalSeconds);
+            SorterTelemetry.MergePasses.Add(pass);
+            SorterTelemetry.RecordsMerged.Add(_metrics.Snapshot.RecordsMerged);
+            activity?.SetTag("passes",         pass);
+            activity?.SetTag("records_merged", _metrics.Snapshot.RecordsMerged);
 
             return currentFiles[0];
         }
