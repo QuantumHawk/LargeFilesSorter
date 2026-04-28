@@ -8,30 +8,24 @@ namespace LargeFileSorter.Telemetry
     /// Builds and manages the OpenTelemetry <see cref="TracerProvider"/> and
     /// <see cref="MeterProvider"/> for the lifetime of the process.
     /// <para>
-    /// <b>Exporters</b>
-    /// <list type="bullet">
-    ///   <item>
-    ///     <b>Console</b> — always active. Traces print finished spans; metrics print
-    ///     on export cycle (every 10 s by default).
-    ///   </item>
-    ///   <item>
-    ///     <b>OTLP</b> — enabled when <c>OTEL_EXPORTER_OTLP_ENDPOINT</c> is set
-    ///     (e.g. <c>http://localhost:4317</c> for a local Jaeger / Grafana Tempo).
-    ///     The standard <c>OTEL_SERVICE_NAME</c> and <c>OTEL_RESOURCE_ATTRIBUTES</c>
-    ///     environment variables are also honoured automatically by the SDK.
-    ///   </item>
-    /// </list>
+    /// <b>Exporter</b>: OTLP (gRPC) — active when the standard
+    /// <c>OTEL_EXPORTER_OTLP_ENDPOINT</c> environment variable is set.
+    /// In ECS this is always <c>http://localhost:4317</c>, pointing at the
+    /// ADOT Collector sidecar which forwards traces to AWS X-Ray and metrics
+    /// to Amazon CloudWatch.
+    /// When the variable is absent (local dev without a collector) the providers
+    /// are built with no exporters and become a silent no-op.
     /// </para>
     /// <para>
-    /// Dispose the returned <see cref="OtelState"/> to flush and shut down both
-    /// providers before the process exits.
+    /// The standard <c>OTEL_SERVICE_NAME</c> and <c>OTEL_RESOURCE_ATTRIBUTES</c>
+    /// environment variables are honoured automatically by the SDK.
     /// </para>
     /// </summary>
     internal static class TelemetrySetup
     {
         /// <summary>
         /// Configures and starts tracing + metrics.
-        /// The caller must dispose the returned state when the process is done.
+        /// Dispose the returned <see cref="OtelState"/> to flush before process exit.
         /// </summary>
         public static OtelState Configure()
         {
@@ -48,8 +42,7 @@ namespace LargeFileSorter.Telemetry
         {
             var builder = Sdk.CreateTracerProviderBuilder()
                 .AddSource(SorterTelemetry.ActivitySourceName)
-                .SetSampler(new AlwaysOnSampler())
-                .AddConsoleExporter();
+                .SetSampler(new AlwaysOnSampler());
 
             if (otlpEnabled)
                 builder = builder.AddOtlpExporter();
@@ -60,8 +53,7 @@ namespace LargeFileSorter.Telemetry
         private static MeterProvider BuildMeterProvider(bool otlpEnabled)
         {
             var builder = Sdk.CreateMeterProviderBuilder()
-                .AddMeter(SorterTelemetry.MeterName)
-                .AddConsoleExporter();
+                .AddMeter(SorterTelemetry.MeterName);
 
             if (otlpEnabled)
                 builder = builder.AddOtlpExporter();
@@ -70,9 +62,7 @@ namespace LargeFileSorter.Telemetry
         }
     }
 
-    /// <summary>
-    /// Holds references to both OTel providers and disposes them together.
-    /// </summary>
+    /// <summary>Holds both OTel providers and disposes them together.</summary>
     internal sealed class OtelState : IDisposable
     {
         private readonly TracerProvider _tracerProvider;

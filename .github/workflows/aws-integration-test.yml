@@ -67,7 +67,17 @@ jobs:
           aws s3api head-bucket --bucket ${{ env.S3_BUCKET }} 2>/dev/null \
             || aws s3api create-bucket --bucket ${{ env.S3_BUCKET }} --region ${{ env.AWS_REGION }}
 
-      # ── Register ECS task definition for the integration test ─────────────
+      # ── Ensure ecsTaskRole has permissions for X-Ray and CloudWatch Metrics ──
+      - name: Attach observability policies to ecsTaskRole
+        run: |
+          aws iam attach-role-policy \
+            --role-name ecsTaskRole \
+            --policy-arn arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess 2>/dev/null || true
+          aws iam attach-role-policy \
+            --role-name ecsTaskRole \
+            --policy-arn arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy 2>/dev/null || true
+
+      # ── Register ECS task definition — sorter + ADOT sidecar ─────────────
       - name: Register task definition
         id: register-task
         run: |
@@ -79,26 +89,45 @@ jobs:
             --memory 16384 \
             --execution-role-arn arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/ecsTaskExecutionRole \
             --task-role-arn      arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/ecsTaskRole \
-            --container-definitions "[{
-              \"name\": \"${{ env.CONTAINER_NAME }}\",
-              \"image\": \"${{ steps.build-image.outputs.image }}\",
-              \"essential\": true,
-              \"environment\": [
-                {\"name\": \"S3_BUCKET\",      \"value\": \"${{ env.S3_BUCKET }}\"},
-                {\"name\": \"FILE_SIZE_MB\",   \"value\": \"${{ inputs.file_size_mb }}\"},
-                {\"name\": \"CHUNK_SIZE_MB\",  \"value\": \"${{ inputs.chunk_size_mb }}\"},
-                {\"name\": \"MERGE_FAN_IN\",   \"value\": \"${{ inputs.merge_fan_in }}\"}
-              ],
-              \"logConfiguration\": {
-                \"logDriver\": \"awslogs\",
-                \"options\": {
-                  \"awslogs-group\": \"/ecs/large-file-sorter-test\",
-                  \"awslogs-region\": \"${{ env.AWS_REGION }}\",
-                  \"awslogs-stream-prefix\": \"ecs\",
-                  \"awslogs-create-group\": \"true\"
+            --container-definitions "[
+              {
+                \"name\": \"${{ env.CONTAINER_NAME }}\",
+                \"image\": \"${{ steps.build-image.outputs.image }}\",
+                \"essential\": true,
+                \"environment\": [
+                  {\"name\": \"S3_BUCKET\",                    \"value\": \"${{ env.S3_BUCKET }}\"},
+                  {\"name\": \"FILE_SIZE_MB\",                 \"value\": \"${{ inputs.file_size_mb }}\"},
+                  {\"name\": \"CHUNK_SIZE_MB\",                \"value\": \"${{ inputs.chunk_size_mb }}\"},
+                  {\"name\": \"MERGE_FAN_IN\",                 \"value\": \"${{ inputs.merge_fan_in }}\"},
+                  {\"name\": \"OTEL_EXPORTER_OTLP_ENDPOINT\", \"value\": \"http://localhost:4317\"},
+                  {\"name\": \"OTEL_SERVICE_NAME\",            \"value\": \"large-file-sorter\"}
+                ],
+                \"logConfiguration\": {
+                  \"logDriver\": \"awslogs\",
+                  \"options\": {
+                    \"awslogs-group\": \"/ecs/large-file-sorter-test\",
+                    \"awslogs-region\": \"${{ env.AWS_REGION }}\",
+                    \"awslogs-stream-prefix\": \"ecs\",
+                    \"awslogs-create-group\": \"true\"
+                  }
+                }
+              },
+              {
+                \"name\": \"aws-otel-collector\",
+                \"image\": \"public.ecr.aws/aws-observability/aws-otel-collector:latest\",
+                \"essential\": false,
+                \"command\": [\"--config=/etc/ecs/ecs-default-config.yaml\"],
+                \"logConfiguration\": {
+                  \"logDriver\": \"awslogs\",
+                  \"options\": {
+                    \"awslogs-group\": \"/ecs/large-file-sorter-test\",
+                    \"awslogs-region\": \"${{ env.AWS_REGION }}\",
+                    \"awslogs-stream-prefix\": \"adot\",
+                    \"awslogs-create-group\": \"true\"
+                  }
                 }
               }
-            }]" \
+            ]" \
             --query 'taskDefinition.taskDefinitionArn' \
             --output text)
           echo "task_def_arn=$TASK_DEF_ARN" >> $GITHUB_OUTPUT
