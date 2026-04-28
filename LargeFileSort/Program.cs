@@ -7,7 +7,6 @@ namespace LargeFileSorter
     {
         static int Main(string[] args)
         {
-            // Start OpenTelemetry — disposed at the end of Main to flush all spans/metrics.
             using var otel = TelemetrySetup.Configure();
 
             try
@@ -18,6 +17,28 @@ namespace LargeFileSorter
                     return 0;
                 }
 
+                // ── Distributed mode ──────────────────────────────────────────
+                int modeIdx = Array.IndexOf(args, "--mode");
+                if (modeIdx >= 0 && modeIdx + 1 < args.Length)
+                {
+                    string mode = args[modeIdx + 1];
+                    DistributedOptions distOpts = ParseDistributedOptions(args);
+
+                    if (mode.Equals("map", StringComparison.OrdinalIgnoreCase))
+                    {
+                        new MapWorker(distOpts).ExecuteAsync().GetAwaiter().GetResult();
+                        return 0;
+                    }
+                    if (mode.Equals("reduce", StringComparison.OrdinalIgnoreCase))
+                    {
+                        new ReduceWorker(distOpts).ExecuteAsync().GetAwaiter().GetResult();
+                        return 0;
+                    }
+                    Console.Error.WriteLine($"Unknown --mode value: {mode}. Allowed: map, reduce.");
+                    return 1;
+                }
+
+                // ── Single-machine sort (default) ─────────────────────────────
                 ParseResult parseResult = ParseArguments(args);
                 if (!parseResult.Success)
                 {
@@ -27,9 +48,7 @@ namespace LargeFileSorter
                     return 1;
                 }
 
-                var sorter = new ExternalSorter(parseResult.Options!);
-                sorter.Sort();
-
+                new ExternalSorter(parseResult.Options!).Sort();
                 return 0;
             }
             catch (Exception ex)
@@ -37,6 +56,33 @@ namespace LargeFileSorter
                 Console.Error.WriteLine(ex);
                 return 2;
             }
+        }
+
+        // ── Distributed argument parser ───────────────────────────────────────
+        private static DistributedOptions ParseDistributedOptions(string[] args)
+        {
+            string Get(string flag, string @default = "") =>
+                args.SkipWhile(a => !string.Equals(a, flag, StringComparison.OrdinalIgnoreCase))
+                    .Skip(1).FirstOrDefault() ?? @default;
+
+            int GetInt(string flag, int @default) =>
+                int.TryParse(Get(flag), out int v) ? v : @default;
+
+            return new DistributedOptions
+            {
+                S3Bucket             = Get("--s3-bucket"),
+                AwsRegion            = Get("--aws-region", "us-east-1"),
+                TempDirectory        = Get("--temp-dir", "/tmp/sort-work"),
+                S3InputKey           = Get("--s3-input-key"),
+                S3PartsPrefix        = Get("--s3-parts-prefix"),
+                S3OutputKey          = Get("--s3-output-key"),
+                WorkerId             = GetInt("--worker-id", 0),
+                WorkerCount          = GetInt("--worker-count", 4),
+                ChunkSizeMb          = GetInt("--chunk-size-mb", 512),
+                MergeFanIn           = GetInt("--merge-fan-in", 32),
+                MaxParallelChunkSorters = GetInt("--max-parallel-chunk-sorters",
+                                            Math.Max(1, Environment.ProcessorCount / 2))
+            };
         }
 
         private static bool HasHelp(string[] args)
@@ -281,6 +327,18 @@ namespace LargeFileSorter
         {
             Console.WriteLine("Usage:");
             Console.WriteLine("  LargeFileSorter <inputPath> <outputPath> [options]");
+            Console.WriteLine("  LargeFileSorter --mode map    --s3-bucket <b> --s3-input-key <k> --s3-parts-prefix <p> --worker-id <n> --worker-count <n> [options]");
+            Console.WriteLine("  LargeFileSorter --mode reduce --s3-bucket <b> --s3-parts-prefix <p> --s3-output-key <k> --worker-count <n> [options]");
+            Console.WriteLine();
+            Console.WriteLine("Distributed options:");
+            Console.WriteLine("  --mode map|reduce             Run as distributed map or reduce worker");
+            Console.WriteLine("  --s3-bucket <name>            S3 bucket name");
+            Console.WriteLine("  --s3-input-key <key>          S3 key of the input file (map mode)");
+            Console.WriteLine("  --s3-parts-prefix <prefix>    S3 prefix for sorted binary parts");
+            Console.WriteLine("  --s3-output-key <key>         S3 key for final sorted output (reduce mode)");
+            Console.WriteLine("  --worker-id <int>             Zero-based worker index (map mode)");
+            Console.WriteLine("  --worker-count <int>          Total number of map workers");
+            Console.WriteLine("  --aws-region <region>         AWS region (default: us-east-1)");
             Console.WriteLine();
             Console.WriteLine("Required:");
             Console.WriteLine("  <inputPath>                         Path to source text file");
