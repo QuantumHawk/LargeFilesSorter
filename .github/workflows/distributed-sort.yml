@@ -188,11 +188,21 @@ jobs:
       # ── Wait for all map workers to finish ───────────────────────────────
       - name: Wait for map workers
         run: |
+          MAX_WAIT_SECS=10800
+          POLL_INTERVAL=30
+
           for ARN in ${{ steps.launch-maps.outputs.task_arns }}; do
             echo "Waiting for $ARN ..."
-            aws ecs wait tasks-stopped --cluster ${{ env.ECS_CLUSTER }} --tasks "$ARN"
-            EXIT_CODE=$(aws ecs describe-tasks \
-              --cluster ${{ env.ECS_CLUSTER }} --tasks "$ARN" \
+            ELAPSED=0
+            while true; do
+              STATUS=$(aws ecs describe-tasks --cluster ${{ env.ECS_CLUSTER }} --tasks "$ARN" \
+                --query 'tasks[0].lastStatus' --output text)
+              echo "  [${ELAPSED}s] $STATUS"
+              [ "$STATUS" = "STOPPED" ] && break
+              [ "$ELAPSED" -ge "$MAX_WAIT_SECS" ] && echo "Timeout!" && exit 1
+              sleep $POLL_INTERVAL; ELAPSED=$((ELAPSED + POLL_INTERVAL))
+            done
+            EXIT_CODE=$(aws ecs describe-tasks --cluster ${{ env.ECS_CLUSTER }} --tasks "$ARN" \
               --query 'tasks[0].containers[0].exitCode' --output text)
             echo "  exit code: $EXIT_CODE"
             if [ "$EXIT_CODE" != "0" ]; then
@@ -234,9 +244,18 @@ jobs:
       - name: Wait for reduce worker
         run: |
           ARN="${{ steps.launch-reduce.outputs.task_arn }}"
-          aws ecs wait tasks-stopped --cluster ${{ env.ECS_CLUSTER }} --tasks "$ARN"
-          EXIT_CODE=$(aws ecs describe-tasks \
-            --cluster ${{ env.ECS_CLUSTER }} --tasks "$ARN" \
+          MAX_WAIT_SECS=10800
+          POLL_INTERVAL=30
+          ELAPSED=0
+          while true; do
+            STATUS=$(aws ecs describe-tasks --cluster ${{ env.ECS_CLUSTER }} --tasks "$ARN" \
+              --query 'tasks[0].lastStatus' --output text)
+            echo "[${ELAPSED}s] $STATUS"
+            [ "$STATUS" = "STOPPED" ] && break
+            [ "$ELAPSED" -ge "$MAX_WAIT_SECS" ] && echo "Timeout!" && exit 1
+            sleep $POLL_INTERVAL; ELAPSED=$((ELAPSED + POLL_INTERVAL))
+          done
+          EXIT_CODE=$(aws ecs describe-tasks --cluster ${{ env.ECS_CLUSTER }} --tasks "$ARN" \
             --query 'tasks[0].containers[0].exitCode' --output text)
           echo "Reduce exit code: $EXIT_CODE"
           if [ "$EXIT_CODE" != "0" ]; then

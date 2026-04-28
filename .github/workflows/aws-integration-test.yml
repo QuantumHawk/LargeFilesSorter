@@ -87,6 +87,7 @@ jobs:
             --requires-compatibilities FARGATE \
             --cpu 4096 \
             --memory 16384 \
+            --ephemeral-storage sizeInGiB=200 \
             --execution-role-arn arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/ecsTaskExecutionRole \
             --task-role-arn      arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/ecsTaskRole \
             --container-definitions "[
@@ -149,11 +150,34 @@ jobs:
       - name: Wait for task to complete
         run: |
           TASK_ARN="${{ steps.run-task.outputs.task_arn }}"
-          echo "Waiting for task to finish (this may take a long time for large files)..."
+          echo "Waiting for task to finish (timeout: 3 hours)..."
 
-          aws ecs wait tasks-stopped \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --tasks "$TASK_ARN"
+          # aws ecs wait times out after 10 min — use a polling loop instead
+          MAX_WAIT_SECS=10800   # 3 hours
+          POLL_INTERVAL=30
+          ELAPSED=0
+
+          while true; do
+            STATUS=$(aws ecs describe-tasks \
+              --cluster ${{ env.ECS_CLUSTER }} \
+              --tasks "$TASK_ARN" \
+              --query 'tasks[0].lastStatus' \
+              --output text)
+
+            echo "[${ELAPSED}s] Task status: $STATUS"
+
+            if [ "$STATUS" = "STOPPED" ]; then
+              break
+            fi
+
+            if [ "$ELAPSED" -ge "$MAX_WAIT_SECS" ]; then
+              echo "Timed out after ${MAX_WAIT_SECS}s waiting for task to stop"
+              exit 1
+            fi
+
+            sleep $POLL_INTERVAL
+            ELAPSED=$((ELAPSED + POLL_INTERVAL))
+          done
 
           EXIT_CODE=$(aws ecs describe-tasks \
             --cluster ${{ env.ECS_CLUSTER }} \
