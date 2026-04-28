@@ -181,10 +181,23 @@ jobs:
             --query 'events[*].message' \
             --output text 2>/dev/null || echo "(logs not available yet)"
 
-      # ── Show S3 output info ───────────────────────────────────────────────
+      # ── Snapshot: first & last 5 lines of sorted output ─────────────────
       - name: Show S3 results
-        if: success()
+        if: always()
         run: |
-          echo "=== S3 Output ==="
-          aws s3 ls s3://${{ env.S3_BUCKET }}/output/ --human-readable
+          echo "=== S3 Files ==="
+          aws s3 ls s3://${{ env.S3_BUCKET }}/ --human-readable --recursive 2>/dev/null || echo "(bucket empty or inaccessible)"
+
+          SORTED="s3://${{ env.S3_BUCKET }}/output/sorted.txt"
+          if aws s3 ls "$SORTED" > /dev/null 2>&1; then
+            echo ""
+            echo "=== First 5 lines of sorted output ==="
+            aws s3 cp "$SORTED" - 2>/dev/null | head -5
+
+            echo ""
+            echo "=== Last 5 lines of sorted output ==="
+            aws s3 cp "$SORTED" - 2>/dev/null | tail -5
+          else
+            echo "sorted.txt not found in S3 — task may have failed before upload"
+          fi
 
