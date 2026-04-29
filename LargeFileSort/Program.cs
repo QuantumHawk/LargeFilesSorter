@@ -120,6 +120,7 @@ namespace LargeFileSorter
             TempFilePolicy tempFilePolicy = TempFilePolicy.DeleteOnSuccess;
             bool useBlockReader = true;
             bool overwriteOutput = true;
+            bool deleteInputAfterSplit = false;
 
             int readerBufferSize = 1 << 20;
             int writerBufferSize = 1 << 20;
@@ -201,6 +202,11 @@ namespace LargeFileSorter
                         i++;
                         break;
 
+                    case "--delete-input-after-split":
+                        deleteInputAfterSplit = true;
+                        i++;
+                        break;
+
                     case "--use-block-reader":
                         useBlockReader = true;
                         i++;
@@ -271,6 +277,7 @@ namespace LargeFileSorter
 
                 ResumeIfManifestExists = resumeIfManifestExists,
                 TempFilePolicy = tempFilePolicy,
+                DeleteInputAfterSplit = deleteInputAfterSplit,
 
                 UseBlockReader = useBlockReader,
                 OverwriteOutput = overwriteOutput,

@@ -48,6 +48,15 @@ namespace Common
         public bool ResumeIfManifestExists { get; init; } = true;
         public string? MetricsPath { get; init; }
 
+        /// <summary>
+        /// When true, the input file is deleted immediately after Phase 1 (SplitPhase)
+        /// completes. The input is never read again after that point, so deleting it
+        /// reclaims ~fileSize bytes of disk space — critical for large files on
+        /// constrained storage (e.g. Fargate 200 GiB ephemeral storage).
+        /// Reduces peak disk usage from 3× to 2× the input file size.
+        /// </summary>
+        public bool DeleteInputAfterSplit { get; init; } = false;
+
         public bool VerboseProgress { get; init; } = true;
     }
 }

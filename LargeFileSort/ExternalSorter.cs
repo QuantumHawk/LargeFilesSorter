@@ -92,6 +92,24 @@ namespace LargeFileSorter
                     var splitPhase = new SplitPhase(_options, _metrics, _tempRegistry);
                     currentChunkFiles = splitPhase.Execute();
 
+                    // Free input file disk space immediately after Phase 1.
+                    // The input is never read again after split, so deleting it
+                    // reduces peak disk usage from 3x to 2x the input file size —
+                    // making 100 GB sorts feasible on 200 GiB Fargate ephemeral storage.
+                    if (_options.DeleteInputAfterSplit)
+                    {
+                        try
+                        {
+                            if (File.Exists(_options.InputPath))
+                                File.Delete(_options.InputPath);
+                            _progress.Report("input file deleted after split (--delete-input-after-split)", force: true);
+                        }
+                        catch (Exception ex)
+                        {
+                            _progress.Report($"warning: could not delete input: {ex.Message}", force: true);
+                        }
+                    }
+
                     manifest.CurrentChunkFiles = currentChunkFiles;
                     manifest.Stage             = "SplitCompleted";
                     SortManifestStore.Save(manifest, ManifestPath);
