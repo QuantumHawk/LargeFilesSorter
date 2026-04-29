@@ -18,13 +18,32 @@ echo "File size  : ${FILE_SIZE_MB} MB"
 echo "Work dir   : $WORK_DIR"
 echo ""
 
+# ── Decide whether to delete input after split ────────────────────────────
+# For files > 20 GB: delete input once Phase 1 (split) is done.
+# Binary chunks are ~85% of text input size, so peak with delete-input is:
+#   max(input + chunks_at_end_of_split, chunks + output)
+#   ≈ max(1.85×, 1.85×) × file_size  → fits in 200 GiB Fargate storage.
+DELETE_INPUT_FLAG=""
+if [ "$FILE_SIZE_MB" -gt 20480 ]; then
+    DELETE_INPUT_FLAG="--delete-input-after-split"
+fi
+
 # ── Disk space check ───────────────────────────────────────────────────────
 AVAILABLE_KB=$(df "$WORK_DIR" | awk 'NR==2 {print $4}')
 AVAILABLE_MB=$((AVAILABLE_KB / 1024))
-# Need ~2× file size: chunks during sort + sorted output
-REQUIRED_MB=$((FILE_SIZE_MB * 2 + 2048))
+
+if [ -n "$DELETE_INPUT_FLAG" ]; then
+    # With delete-input: peak ≈ 1.85× file size (chunks ~85% of text + output)
+    REQUIRED_MB=$((FILE_SIZE_MB * 185 / 100 + 1024))
+    REQUIRED_DESC="1.85× file size + 1 GB buffer (--delete-input-after-split enabled)"
+else
+    # Without delete-input: input + chunks + output ≈ 3× but we cap at 2× + buffer
+    REQUIRED_MB=$((FILE_SIZE_MB * 2 + 2048))
+    REQUIRED_DESC="2× file size + 2 GB buffer"
+fi
+
 echo "Disk available : ${AVAILABLE_MB} MB"
-echo "Disk required  : ${REQUIRED_MB} MB (2× file size + 2 GB buffer)"
+echo "Disk required  : ${REQUIRED_MB} MB (${REQUIRED_DESC})"
 if [ "$AVAILABLE_MB" -lt "$REQUIRED_MB" ]; then
     echo "ERROR: Not enough disk space. Have ${AVAILABLE_MB} MB, need ${REQUIRED_MB} MB."
     echo "       For files > 50 GB use the Distributed Sort workflow instead."
@@ -47,13 +66,7 @@ echo "      Upload complete"
 echo "[3/4] Sorting..."
 SORT_START=$(date +%s)
 
-# --delete-input-after-split frees the input file from disk once Phase 1
-# (split) is done — the sorter never reads it again after that point.
-# This reduces peak disk usage from 3× to 2× the file size, allowing
-# 100 GB sorts to fit within 200 GiB Fargate ephemeral storage.
-DELETE_INPUT_FLAG=""
-if [ "$FILE_SIZE_MB" -gt 20480 ]; then
-    DELETE_INPUT_FLAG="--delete-input-after-split"
+if [ -n "$DELETE_INPUT_FLAG" ]; then
     echo "      Large file detected — enabling --delete-input-after-split"
 fi
 
