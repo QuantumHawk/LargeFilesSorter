@@ -156,31 +156,58 @@ jobs:
 
           for i in $(seq 0 $((WORKER_COUNT - 1))); do
             echo "Launching map worker $i / $WORKER_COUNT ..."
-            ARN=$(aws ecs run-task \
-              --cluster ${{ env.ECS_CLUSTER }} \
-              --task-definition $TASK_DEF \
-              --launch-type FARGATE \
-              --network-configuration "awsvpcConfiguration={subnets=[${{ secrets.SUBNET_ID }}],securityGroups=[${{ secrets.SECURITY_GROUP_ID }}],assignPublicIp=ENABLED}" \
-              --overrides "{
-                \"containerOverrides\": [{
-                  \"name\": \"${{ env.CONTAINER_NAME }}\",
-                  \"command\": [
-                    \"--mode\",            \"map\",
-                    \"--s3-bucket\",       \"${{ env.S3_BUCKET }}\",
-                    \"--s3-input-key\",    \"${{ env.S3_INPUT_KEY }}\",
-                    \"--s3-parts-prefix\", \"$PARTS_PREFIX\",
-                    \"--worker-id\",       \"$i\",
-                    \"--worker-count\",    \"$WORKER_COUNT\",
-                    \"--chunk-size-mb\",   \"${{ inputs.chunk_size_mb }}\",
-                    \"--merge-fan-in\",    \"${{ inputs.merge_fan_in }}\",
-                    \"--aws-region\",      \"${{ env.AWS_REGION }}\",
-                    \"--temp-dir\",        \"/tmp/sort-work\"
-                  ]
-                }]
-              }" \
-              --query 'tasks[0].taskArn' --output text)
+
+            # Retry up to 3 times in case of transient ECS throttling
+            ARN=""
+            for attempt in 1 2 3; do
+              RESPONSE=$(aws ecs run-task \
+                --cluster ${{ env.ECS_CLUSTER }} \
+                --task-definition $TASK_DEF \
+                --launch-type FARGATE \
+                --network-configuration "awsvpcConfiguration={subnets=[${{ secrets.SUBNET_ID }}],securityGroups=[${{ secrets.SECURITY_GROUP_ID }}],assignPublicIp=ENABLED}" \
+                --overrides "{
+                  \"containerOverrides\": [{
+                    \"name\": \"${{ env.CONTAINER_NAME }}\",
+                    \"command\": [
+                      \"--mode\",            \"map\",
+                      \"--s3-bucket\",       \"${{ env.S3_BUCKET }}\",
+                      \"--s3-input-key\",    \"${{ env.S3_INPUT_KEY }}\",
+                      \"--s3-parts-prefix\", \"$PARTS_PREFIX\",
+                      \"--worker-id\",       \"$i\",
+                      \"--worker-count\",    \"$WORKER_COUNT\",
+                      \"--chunk-size-mb\",   \"${{ inputs.chunk_size_mb }}\",
+                      \"--merge-fan-in\",    \"${{ inputs.merge_fan_in }}\",
+                      \"--aws-region\",      \"${{ env.AWS_REGION }}\",
+                      \"--temp-dir\",        \"/tmp/sort-work\"
+                    ]
+                  }]
+                }" 2>&1)
+
+              ARN=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['tasks'][0]['taskArn'] if d.get('tasks') else 'None')" 2>/dev/null || echo "None")
+
+              if [ "$ARN" != "None" ] && [ -n "$ARN" ]; then
+                break
+              fi
+
+              echo "  attempt $attempt failed. Failures:"
+              echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); [print('   ',f) for f in d.get('failures',[])]" 2>/dev/null || echo "$RESPONSE"
+
+              if [ "$attempt" -lt 3 ]; then
+                echo "  Retrying in 10s..."
+                sleep 10
+              fi
+            done
+
+            if [ "$ARN" = "None" ] || [ -z "$ARN" ]; then
+              echo "ERROR: Failed to launch map worker $i after 3 attempts"
+              exit 1
+            fi
+
             echo "  worker $i → $ARN"
             ARNS="$ARNS $ARN"
+
+            # Small delay between launches to avoid ECS request throttling
+            sleep 2
           done
 
           echo "task_arns=$ARNS" >> $GITHUB_OUTPUT
@@ -216,27 +243,45 @@ jobs:
       - name: Launch reduce worker
         id: launch-reduce
         run: |
-          ARN=$(aws ecs run-task \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --task-definition ${{ steps.register-task.outputs.task_def_arn }} \
-            --launch-type FARGATE \
-            --network-configuration "awsvpcConfiguration={subnets=[${{ secrets.SUBNET_ID }}],securityGroups=[${{ secrets.SECURITY_GROUP_ID }}],assignPublicIp=ENABLED}" \
-            --overrides "{
-              \"containerOverrides\": [{
-                \"name\": \"${{ env.CONTAINER_NAME }}\",
-                \"command\": [
-                  \"--mode\",            \"reduce\",
-                  \"--s3-bucket\",       \"${{ env.S3_BUCKET }}\",
-                  \"--s3-parts-prefix\", \"${{ steps.run-prefix.outputs.parts_prefix }}\",
-                  \"--s3-output-key\",   \"${{ steps.run-prefix.outputs.output_key }}\",
-                  \"--worker-count\",    \"${{ inputs.worker_count }}\",
-                  \"--merge-fan-in\",    \"${{ inputs.merge_fan_in }}\",
-                  \"--aws-region\",      \"${{ env.AWS_REGION }}\",
-                  \"--temp-dir\",        \"/tmp/sort-work\"
-                ]
-              }]
-            }" \
-            --query 'tasks[0].taskArn' --output text)
+          ARN=""
+          for attempt in 1 2 3; do
+            RESPONSE=$(aws ecs run-task \
+              --cluster ${{ env.ECS_CLUSTER }} \
+              --task-definition ${{ steps.register-task.outputs.task_def_arn }} \
+              --launch-type FARGATE \
+              --network-configuration "awsvpcConfiguration={subnets=[${{ secrets.SUBNET_ID }}],securityGroups=[${{ secrets.SECURITY_GROUP_ID }}],assignPublicIp=ENABLED}" \
+              --overrides "{
+                \"containerOverrides\": [{
+                  \"name\": \"${{ env.CONTAINER_NAME }}\",
+                  \"command\": [
+                    \"--mode\",            \"reduce\",
+                    \"--s3-bucket\",       \"${{ env.S3_BUCKET }}\",
+                    \"--s3-parts-prefix\", \"${{ steps.run-prefix.outputs.parts_prefix }}\",
+                    \"--s3-output-key\",   \"${{ steps.run-prefix.outputs.output_key }}\",
+                    \"--worker-count\",    \"${{ inputs.worker_count }}\",
+                    \"--merge-fan-in\",    \"${{ inputs.merge_fan_in }}\",
+                    \"--aws-region\",      \"${{ env.AWS_REGION }}\",
+                    \"--temp-dir\",        \"/tmp/sort-work\"
+                  ]
+                }]
+              }" 2>&1)
+
+            ARN=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['tasks'][0]['taskArn'] if d.get('tasks') else 'None')" 2>/dev/null || echo "None")
+
+            if [ "$ARN" != "None" ] && [ -n "$ARN" ]; then
+              break
+            fi
+
+            echo "attempt $attempt failed:"
+            echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); [print(' ',f) for f in d.get('failures',[])]" 2>/dev/null || echo "$RESPONSE"
+            [ "$attempt" -lt 3 ] && sleep 10
+          done
+
+          if [ "$ARN" = "None" ] || [ -z "$ARN" ]; then
+            echo "ERROR: Failed to launch reduce worker after 3 attempts"
+            exit 1
+          fi
+
           echo "task_arn=$ARN" >> $GITHUB_OUTPUT
           echo "Reduce task: $ARN"
 
