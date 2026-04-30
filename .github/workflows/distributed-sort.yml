@@ -3,10 +3,16 @@ name: Distributed Sort (Map-Reduce)
 on:
   workflow_dispatch:
     inputs:
-      file_size_mb:
-        description: 'Input file size in MB to generate via aws-integration-test first, then set 0 here to reuse s3://…/input/input.txt'
+      generate_input:
+        description: 'Generate a new input file? Set file_size_mb below. Leave false to reuse existing s3://…/input/input.txt'
         required: false
-        default: '0'
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+      file_size_mb:
+        description: 'Input file size in MB to generate (used only when generate_input=true, e.g. 102400 = 100 GB)'
+        required: false
+        default: '102400'
       worker_count:
         description: 'Number of parallel map workers (each uses 2 vCPUs; stay within your Fargate quota)'
         required: false
@@ -25,13 +31,14 @@ on:
         default: ''
 
 env:
-  AWS_REGION:     us-east-1
-  ECS_CLUSTER:    large-file-sorter-cluster
-  TASK_FAMILY:    large-file-sorter-distributed
-  CONTAINER_NAME: large-file-sorter
-  ECR_REPOSITORY: large-file-sorter
-  S3_BUCKET:      large-file-sorter-test-quantumhawk
-  S3_INPUT_KEY:   input/input.txt
+  AWS_REGION:          us-east-1
+  ECS_CLUSTER:         large-file-sorter-cluster
+  TASK_FAMILY:         large-file-sorter-distributed
+  CONTAINER_NAME:      large-file-sorter
+  ECR_REPOSITORY:      large-file-sorter
+  ECR_REPOSITORY_TEST: large-file-sorter-test
+  S3_BUCKET:           large-file-sorter-test-quantumhawk
+  S3_INPUT_KEY:        input/input.txt
 
 jobs:
   distributed-sort:
@@ -53,8 +60,8 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ── Build & push image (same Dockerfile, now includes --mode support) ──
-      - name: Build & push image
+      # ── Build & push sorter image ─────────────────────────────────────────
+      - name: Build & push sorter image
         id: build-image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -66,6 +73,99 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      # ── Build & push test image (needed for generate step) ───────────────
+      - name: Build & push test image
+        if: ${{ inputs.generate_input == 'true' }}
+        id: build-test-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG:    ${{ github.sha }}
+        run: |
+          aws ecr create-repository --repository-name $ECR_REPOSITORY_TEST 2>/dev/null || true
+          docker build -f Dockerfile.awstest \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY_TEST:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY_TEST:latest .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_TEST:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_TEST:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY_TEST:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      # ── Generate & upload input file via ECS (generate_input=true only) ──
+      - name: Generate & upload input file
+        if: ${{ inputs.generate_input == 'true' }}
+        run: |
+          FILE_SIZE_MB=${{ inputs.file_size_mb }}
+          TEST_IMAGE="${{ steps.build-test-image.outputs.image }}"
+
+          # Storage for generator: file_size_mb + 10 GiB overhead, min 21 GiB
+          GEN_STORAGE_MB=$((FILE_SIZE_MB + 10240))
+          GEN_STORAGE_GIB=$((GEN_STORAGE_MB / 1024 + 1))
+          [ "$GEN_STORAGE_GIB" -lt 21  ] && GEN_STORAGE_GIB=21
+          [ "$GEN_STORAGE_GIB" -gt 200 ] && GEN_STORAGE_GIB=200
+
+          echo "Registering generator task (${FILE_SIZE_MB} MB, storage=${GEN_STORAGE_GIB} GiB)..."
+          GEN_TASK_DEF=$(aws ecs register-task-definition \
+            --family large-file-sorter-generate \
+            --network-mode awsvpc \
+            --requires-compatibilities FARGATE \
+            --cpu 4096 --memory 16384 \
+            --ephemeral-storage sizeInGiB=$GEN_STORAGE_GIB \
+            --execution-role-arn arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/ecsTaskExecutionRole \
+            --task-role-arn      arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/ecsTaskRole \
+            --container-definitions "[{
+              \"name\": \"large-file-sorter-test\",
+              \"image\": \"$TEST_IMAGE\",
+              \"essential\": true,
+              \"environment\": [
+                {\"name\": \"S3_BUCKET\",    \"value\": \"${{ env.S3_BUCKET }}\"},
+                {\"name\": \"FILE_SIZE_MB\", \"value\": \"$FILE_SIZE_MB\"},
+                {\"name\": \"SKIP_SORT\",    \"value\": \"true\"}
+              ],
+              \"logConfiguration\": {
+                \"logDriver\": \"awslogs\",
+                \"options\": {
+                  \"awslogs-group\": \"/ecs/large-file-sorter-test\",
+                  \"awslogs-region\": \"${{ env.AWS_REGION }}\",
+                  \"awslogs-stream-prefix\": \"gen\",
+                  \"awslogs-create-group\": \"true\"
+                }
+              }
+            }]" \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+
+          echo "Launching generator task..."
+          GEN_ARN=$(aws ecs run-task \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --task-definition $GEN_TASK_DEF \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ secrets.SUBNET_ID }}],securityGroups=[${{ secrets.SECURITY_GROUP_ID }}],assignPublicIp=ENABLED}" \
+            --query 'tasks[0].taskArn' --output text)
+          echo "Generator task ARN: $GEN_ARN"
+
+          echo "Waiting for generator to finish (may take a while for large files)..."
+          MAX_WAIT_SECS=10800; POLL_INTERVAL=30; ELAPSED=0
+          while true; do
+            STATUS=$(aws ecs describe-tasks --cluster ${{ env.ECS_CLUSTER }} --tasks "$GEN_ARN" \
+              --query 'tasks[0].lastStatus' --output text)
+            echo "  [${ELAPSED}s] $STATUS"
+            [ "$STATUS" = "STOPPED" ] && break
+            [ "$ELAPSED" -ge "$MAX_WAIT_SECS" ] && echo "Timeout!" && exit 1
+            sleep $POLL_INTERVAL; ELAPSED=$((ELAPSED + POLL_INTERVAL))
+          done
+
+          EXIT_CODE=$(aws ecs describe-tasks --cluster ${{ env.ECS_CLUSTER }} --tasks "$GEN_ARN" \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+          echo "Generator exit code: $EXIT_CODE"
+          if [ "$EXIT_CODE" != "0" ]; then
+            TASK_ID=$(echo "$GEN_ARN" | awk -F/ '{print $NF}')
+            echo "--- Generator logs ---"
+            aws logs get-log-events \
+              --log-group-name /ecs/large-file-sorter-test \
+              --log-stream-name "gen/large-file-sorter-test/$TASK_ID" \
+              --query 'events[*].message' --output text 2>/dev/null || echo "(logs unavailable)"
+            exit 1
+          fi
+          echo "Input file generated and uploaded to s3://${{ env.S3_BUCKET }}/${{ env.S3_INPUT_KEY }}"
 
       # ── Generate a unique run prefix for this distributed run ────────────
       - name: Set run prefix
@@ -80,40 +180,26 @@ jobs:
           echo "output_key=distributed/$RUN_ID/output/sorted.txt" >> $GITHUB_OUTPUT
           echo "Run ID: $RUN_ID"
 
-      # ── Optionally generate test input and upload to S3 ──────────────────
-      - name: Generate & upload input (if file_size_mb > 0)
-        if: ${{ inputs.file_size_mb != '0' }}
+      # ── Query S3 for actual input file size → used for storage calculation ──
+      - name: Probe S3 input file size
+        id: probe-s3
         run: |
-          IMAGE="${{ steps.build-image.outputs.image }}"
-          TASK_DEF_ARN=$(aws ecs register-task-definition \
-            --family large-file-sorter-gen \
-            --network-mode awsvpc \
-            --requires-compatibilities FARGATE \
-            --cpu 4096 --memory 16384 \
-            --execution-role-arn arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/ecsTaskExecutionRole \
-            --task-role-arn      arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/ecsTaskRole \
-            --container-definitions "[{
-              \"name\": \"${{ env.CONTAINER_NAME }}\",
-              \"image\": \"$IMAGE\",
-              \"essential\": true,
-              \"command\": [\"/tmp/gen-work/input.txt\", \"${{ inputs.file_size_mb }}\"],
-              \"environment\": [],
-              \"logConfiguration\": {
-                \"logDriver\": \"awslogs\",
-                \"options\": {
-                  \"awslogs-group\": \"/ecs/large-file-sorter\",
-                  \"awslogs-region\": \"${{ env.AWS_REGION }}\",
-                  \"awslogs-stream-prefix\": \"gen\",
-                  \"awslogs-create-group\": \"true\"
-                }
-              }
-            }]" \
-            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "Probing s3://${{ env.S3_BUCKET }}/${{ env.S3_INPUT_KEY }} ..."
+          BYTES=$(aws s3api head-object \
+            --bucket ${{ env.S3_BUCKET }} \
+            --key    ${{ env.S3_INPUT_KEY }} \
+            --query  'ContentLength' \
+            --output text 2>/dev/null || echo "0")
 
-          # Actually: use awstest image that has aws cli to upload
-          # For simplicity, use the aws-integration-test workflow to generate
-          echo "Skipping generator — use existing input or run aws-integration-test first"
-          echo "(set file_size_mb=0 and ensure s3://${{ env.S3_BUCKET }}/${{ env.S3_INPUT_KEY }} exists)"
+          if [ "$BYTES" = "0" ] || [ -z "$BYTES" ]; then
+            echo "ERROR: s3://${{ env.S3_BUCKET }}/${{ env.S3_INPUT_KEY }} not found."
+            echo "Run this workflow with generate_input=true first, or run aws-integration-test to create the file."
+            exit 1
+          fi
+
+          SIZE_MB=$((BYTES / 1048576))
+          echo "Input file: ${SIZE_MB} MB (${BYTES} bytes)"
+          echo "size_mb=$SIZE_MB" >> $GITHUB_OUTPUT
 
       # ── Register task definition once (reused by all workers) ───────────
       - name: Register ECS task definition
@@ -123,28 +209,22 @@ jobs:
         run: |
           # Ephemeral storage per worker: each worker downloads fileSize/workerCount
           # text, writes binary chunks (~85%), writes merged binary (~85%).
-          # Peak ≈ 2.5× per-worker slice.  Add 10 GB OS/image overhead, min 21 GiB.
-          FILE_SIZE_MB=${{ inputs.file_size_mb }}
+          # Peak ≈ 2.5× per-worker slice.  Add 10 GiB OS/image overhead, min 21 GiB.
+          FILE_SIZE_MB=${{ steps.probe-s3.outputs.size_mb }}
           WORKER_COUNT=${{ inputs.worker_count }}
 
-          # When file_size_mb=0 we assume a pre-existing file; default to 50 GiB storage
-          if [ "$FILE_SIZE_MB" -eq 0 ]; then
-            STORAGE_GIB=50
-          else
-            SLICE_MB=$((FILE_SIZE_MB / WORKER_COUNT))
-            STORAGE_MB=$((SLICE_MB * 25 / 10 + 10240))  # 2.5× slice + 10 GB
-            STORAGE_GIB=$((STORAGE_MB / 1024 + 1))
-          fi
+          SLICE_MB=$((FILE_SIZE_MB / WORKER_COUNT))
+          STORAGE_MB=$((SLICE_MB * 25 / 10 + 10240))  # 2.5× slice + 10 GB
+          STORAGE_GIB=$((STORAGE_MB / 1024 + 1))
 
           # Clamp to Fargate limits [21, 200]
           [ "$STORAGE_GIB" -lt 21 ]  && STORAGE_GIB=21
           [ "$STORAGE_GIB" -gt 200 ] && STORAGE_GIB=200
 
-          echo "Ephemeral storage per worker: ${STORAGE_GIB} GiB (file=${FILE_SIZE_MB} MB, workers=${WORKER_COUNT})"
+          echo "Ephemeral storage per worker: ${STORAGE_GIB} GiB"
+          echo "  Input: ${FILE_SIZE_MB} MB  |  Workers: ${WORKER_COUNT}  |  Slice: ${SLICE_MB} MB"
 
-          # Map/reduce workers are I/O-bound: 2 vCPUs + 8 GB RAM is sufficient
-          # and uses half the vCPUs of the default task, allowing more parallelism
-          # within the Fargate On-Demand vCPU quota (default ~40 vCPUs).
+          # Map/reduce workers are I/O-bound: 2 vCPUs + 8 GB RAM is sufficient.
           TASK_DEF_ARN=$(aws ecs register-task-definition \
             --family ${{ env.TASK_FAMILY }} \
             --network-mode awsvpc \
@@ -177,14 +257,13 @@ jobs:
           VCPUS_PER_TASK=2
           VCPUS_NEEDED=$((WORKER_COUNT * VCPUS_PER_TASK))
 
-          # Get the Fargate On-Demand vCPU quota (service quota code L-3032A538)
           QUOTA=$(aws service-quotas get-service-quota \
             --service-code fargate \
             --quota-code L-3032A538 \
             --query 'Quota.Value' \
             --output text 2>/dev/null || echo "0")
 
-          QUOTA_INT=${QUOTA%.*}   # drop decimal
+          QUOTA_INT=${QUOTA%.*}
 
           echo "Fargate vCPU quota : ${QUOTA_INT} vCPUs"
           echo "Workers requested  : ${WORKER_COUNT} × ${VCPUS_PER_TASK} vCPUs = ${VCPUS_NEEDED} vCPUs"
@@ -214,7 +293,6 @@ jobs:
           for i in $(seq 0 $((WORKER_COUNT - 1))); do
             echo "Launching map worker $i / $WORKER_COUNT ..."
 
-            # Retry up to 3 times in case of transient ECS throttling
             ARN=""
             for attempt in 1 2 3; do
               RESPONSE=$(aws ecs run-task \
@@ -262,8 +340,6 @@ jobs:
 
             echo "  worker $i → $ARN"
             ARNS="$ARNS $ARN"
-
-            # Small delay between launches to avoid ECS request throttling
             sleep 2
           done
 
