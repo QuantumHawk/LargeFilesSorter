@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       file_size_mb:
-        description: 'Input file size in MB to generate (0 = use existing s3://…/input/input.txt)'
+        description: 'Input file size in MB to generate via aws-integration-test first, then set 0 here to reuse s3://…/input/input.txt'
         required: false
-        default: '1024'
+        default: '0'
       worker_count:
         description: 'Number of parallel map workers (each uses 2 vCPUs; stay within your Fargate quota)'
         required: false
@@ -121,6 +121,27 @@ jobs:
         env:
           IMAGE: ${{ steps.build-image.outputs.image }}
         run: |
+          # Ephemeral storage per worker: each worker downloads fileSize/workerCount
+          # text, writes binary chunks (~85%), writes merged binary (~85%).
+          # Peak ≈ 2.5× per-worker slice.  Add 10 GB OS/image overhead, min 21 GiB.
+          FILE_SIZE_MB=${{ inputs.file_size_mb }}
+          WORKER_COUNT=${{ inputs.worker_count }}
+
+          # When file_size_mb=0 we assume a pre-existing file; default to 50 GiB storage
+          if [ "$FILE_SIZE_MB" -eq 0 ]; then
+            STORAGE_GIB=50
+          else
+            SLICE_MB=$((FILE_SIZE_MB / WORKER_COUNT))
+            STORAGE_MB=$((SLICE_MB * 25 / 10 + 10240))  # 2.5× slice + 10 GB
+            STORAGE_GIB=$((STORAGE_MB / 1024 + 1))
+          fi
+
+          # Clamp to Fargate limits [21, 200]
+          [ "$STORAGE_GIB" -lt 21 ]  && STORAGE_GIB=21
+          [ "$STORAGE_GIB" -gt 200 ] && STORAGE_GIB=200
+
+          echo "Ephemeral storage per worker: ${STORAGE_GIB} GiB (file=${FILE_SIZE_MB} MB, workers=${WORKER_COUNT})"
+
           # Map/reduce workers are I/O-bound: 2 vCPUs + 8 GB RAM is sufficient
           # and uses half the vCPUs of the default task, allowing more parallelism
           # within the Fargate On-Demand vCPU quota (default ~40 vCPUs).
@@ -129,6 +150,7 @@ jobs:
             --network-mode awsvpc \
             --requires-compatibilities FARGATE \
             --cpu 2048 --memory 8192 \
+            --ephemeral-storage sizeInGiB=$STORAGE_GIB \
             --execution-role-arn arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/ecsTaskExecutionRole \
             --task-role-arn      arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/ecsTaskRole \
             --container-definitions "[{
@@ -269,6 +291,13 @@ jobs:
             echo "  exit code: $EXIT_CODE"
             if [ "$EXIT_CODE" != "0" ]; then
               echo "Map worker FAILED: $ARN (exit $EXIT_CODE)"
+              TASK_ID=$(echo "$ARN" | awk -F/ '{print $NF}')
+              echo "--- CloudWatch logs for failed worker ($TASK_ID) ---"
+              aws logs get-log-events \
+                --log-group-name /ecs/large-file-sorter \
+                --log-stream-name "dist/${{ env.CONTAINER_NAME }}/$TASK_ID" \
+                --query 'events[*].message' \
+                --output text 2>/dev/null || echo "(logs not available)"
               exit 1
             fi
           done
@@ -340,6 +369,13 @@ jobs:
           echo "Reduce exit code: $EXIT_CODE"
           if [ "$EXIT_CODE" != "0" ]; then
             echo "Reduce worker FAILED (exit $EXIT_CODE)"
+            TASK_ID=$(echo "$ARN" | awk -F/ '{print $NF}')
+            echo "--- CloudWatch logs for reduce worker ($TASK_ID) ---"
+            aws logs get-log-events \
+              --log-group-name /ecs/large-file-sorter \
+              --log-stream-name "dist/${{ env.CONTAINER_NAME }}/$TASK_ID" \
+              --query 'events[*].message' \
+              --output text 2>/dev/null || echo "(logs not available)"
             exit 1
           fi
 
