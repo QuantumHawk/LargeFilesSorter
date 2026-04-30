@@ -8,9 +8,9 @@ on:
         required: false
         default: '1024'
       worker_count:
-        description: 'Number of parallel map workers'
+        description: 'Number of parallel map workers (each uses 2 vCPUs; stay within your Fargate quota)'
         required: false
-        default: '4'
+        default: '6'
       chunk_size_mb:
         description: 'Chunk size per worker in MB'
         required: false
@@ -121,11 +121,14 @@ jobs:
         env:
           IMAGE: ${{ steps.build-image.outputs.image }}
         run: |
+          # Map/reduce workers are I/O-bound: 2 vCPUs + 8 GB RAM is sufficient
+          # and uses half the vCPUs of the default task, allowing more parallelism
+          # within the Fargate On-Demand vCPU quota (default ~40 vCPUs).
           TASK_DEF_ARN=$(aws ecs register-task-definition \
             --family ${{ env.TASK_FAMILY }} \
             --network-mode awsvpc \
             --requires-compatibilities FARGATE \
-            --cpu 4096 --memory 16384 \
+            --cpu 2048 --memory 8192 \
             --execution-role-arn arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/ecsTaskExecutionRole \
             --task-role-arn      arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/ecsTaskRole \
             --container-definitions "[{
@@ -144,6 +147,38 @@ jobs:
             }]" \
             --query 'taskDefinition.taskDefinitionArn' --output text)
           echo "task_def_arn=$TASK_DEF_ARN" >> $GITHUB_OUTPUT
+
+      # ── Pre-flight: check Fargate vCPU quota ────────────────────────────
+      - name: Check Fargate vCPU quota
+        run: |
+          WORKER_COUNT=${{ inputs.worker_count }}
+          VCPUS_PER_TASK=2
+          VCPUS_NEEDED=$((WORKER_COUNT * VCPUS_PER_TASK))
+
+          # Get the Fargate On-Demand vCPU quota (service quota code L-3032A538)
+          QUOTA=$(aws service-quotas get-service-quota \
+            --service-code fargate \
+            --quota-code L-3032A538 \
+            --query 'Quota.Value' \
+            --output text 2>/dev/null || echo "0")
+
+          QUOTA_INT=${QUOTA%.*}   # drop decimal
+
+          echo "Fargate vCPU quota : ${QUOTA_INT} vCPUs"
+          echo "Workers requested  : ${WORKER_COUNT} × ${VCPUS_PER_TASK} vCPUs = ${VCPUS_NEEDED} vCPUs"
+
+          if [ "$QUOTA_INT" -gt 0 ] && [ "$VCPUS_NEEDED" -gt "$QUOTA_INT" ]; then
+            echo ""
+            echo "ERROR: Not enough Fargate vCPU quota."
+            echo "  Need ${VCPUS_NEEDED}, have ${QUOTA_INT}."
+            echo "  Options:"
+            echo "    1. Reduce worker_count to $((QUOTA_INT / VCPUS_PER_TASK)) or fewer"
+            echo "    2. Request a quota increase:"
+            echo "       AWS Console → Service Quotas → AWS Fargate → 'Fargate On-Demand vCPU resource count'"
+            exit 1
+          fi
+
+          echo "Quota check passed."
 
       # ── Launch all map workers in parallel ───────────────────────────────
       - name: Launch map workers
