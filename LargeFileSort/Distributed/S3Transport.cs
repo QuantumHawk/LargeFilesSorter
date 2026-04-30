@@ -2,6 +2,7 @@ using System.Text;
 using Amazon;
 using Amazon.S3;
 using Amazon.S3.Model;
+using Amazon.S3.Transfer;
 
 namespace LargeFileSorter
 {
@@ -77,19 +78,29 @@ namespace LargeFileSorter
 
         public async Task UploadFileAsync(string bucket, string key, string localPath)
         {
-            await using var fs = File.OpenRead(localPath);
-            await _s3.PutObjectAsync(new PutObjectRequest
+            // TransferUtility automatically uses multipart upload for large files.
+            // PutObjectAsync has a 5 GB single-part limit — parts can exceed that for 100 GB inputs.
+            using var transfer = new TransferUtility(_s3);
+            await transfer.UploadAsync(new TransferUtilityUploadRequest
             {
-                BucketName = bucket, Key = key, InputStream = fs
+                BucketName = bucket,
+                Key        = key,
+                FilePath   = localPath,
+                PartSize   = 64 * 1024 * 1024   // 64 MB parts
             }).ConfigureAwait(false);
         }
 
         public async Task DownloadFileAsync(string bucket, string key, string localPath)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(localPath)) ?? ".");
-            using var response = await _s3.GetObjectAsync(bucket, key).ConfigureAwait(false);
-            await using var fs = File.Create(localPath);
-            await response.ResponseStream.CopyToAsync(fs).ConfigureAwait(false);
+            // TransferUtility handles large files correctly via ranged GET internally.
+            using var transfer = new TransferUtility(_s3);
+            await transfer.DownloadAsync(new TransferUtilityDownloadRequest
+            {
+                BucketName = bucket,
+                Key        = key,
+                FilePath   = localPath
+            }).ConfigureAwait(false);
         }
 
         public async Task<List<string>> ListKeysAsync(string bucket, string prefix)
@@ -111,4 +122,3 @@ namespace LargeFileSorter
         public void Dispose() => _s3.Dispose();
     }
 }
-
