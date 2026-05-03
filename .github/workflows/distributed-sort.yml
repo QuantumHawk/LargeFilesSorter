@@ -68,6 +68,16 @@ jobs:
           IMAGE_TAG:    ${{ github.sha }}
         run: |
           aws ecr create-repository --repository-name $ECR_REPOSITORY 2>/dev/null || true
+
+          # Pre-pull base images to work around MCR rate limiting (403 errors)
+          for img in mcr.microsoft.com/dotnet/sdk:10.0 mcr.microsoft.com/dotnet/runtime-deps:10.0; do
+            for attempt in 1 2 3; do
+              docker pull "$img" && break
+              echo "Pull $img attempt $attempt failed, retrying in 30s..."
+              sleep 30
+            done
+          done
+
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
                        -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
@@ -83,6 +93,16 @@ jobs:
           IMAGE_TAG:    ${{ github.sha }}
         run: |
           aws ecr create-repository --repository-name $ECR_REPOSITORY_TEST 2>/dev/null || true
+
+          # Pre-pull base images to work around MCR rate limiting (403 errors)
+          for img in mcr.microsoft.com/dotnet/sdk:10.0 ubuntu:24.04; do
+            for attempt in 1 2 3; do
+              docker pull "$img" && break
+              echo "Pull $img attempt $attempt failed, retrying in 30s..."
+              sleep 30
+            done
+          done
+
           docker build -f Dockerfile.awstest \
             -t $ECR_REGISTRY/$ECR_REPOSITORY_TEST:$IMAGE_TAG \
             -t $ECR_REGISTRY/$ECR_REPOSITORY_TEST:latest .
