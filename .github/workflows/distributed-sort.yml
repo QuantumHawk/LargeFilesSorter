@@ -250,6 +250,48 @@ jobs:
             --query 'taskDefinition.taskDefinitionArn' --output text)
           echo "task_def_arn=$TASK_DEF_ARN" >> $GITHUB_OUTPUT
 
+      # ── Register REDUCE task definition (needs all parts + output on disk) ─
+      - name: Register reduce task definition
+        id: register-reduce-task
+        env:
+          IMAGE: ${{ steps.build-image.outputs.image }}
+        run: |
+          FILE_SIZE_MB=${{ steps.probe-s3.outputs.size_mb }}
+
+          # Reduce worker holds: all binary parts (~85% of input) + text output (~100% of input)
+          # Total ≈ 1.85× input size + 10 GiB overhead. Clamp to Fargate max 200 GiB.
+          REDUCE_STORAGE_MB=$((FILE_SIZE_MB * 185 / 100 + 10240))
+          REDUCE_STORAGE_GIB=$((REDUCE_STORAGE_MB / 1024 + 1))
+          [ "$REDUCE_STORAGE_GIB" -lt 21  ] && REDUCE_STORAGE_GIB=21
+          [ "$REDUCE_STORAGE_GIB" -gt 200 ] && REDUCE_STORAGE_GIB=200
+
+          echo "Reduce worker storage: ${REDUCE_STORAGE_GIB} GiB  (input=${FILE_SIZE_MB} MB)"
+
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --family ${{ env.TASK_FAMILY }}-reduce \
+            --network-mode awsvpc \
+            --requires-compatibilities FARGATE \
+            --cpu 4096 --memory 16384 \
+            --ephemeral-storage sizeInGiB=$REDUCE_STORAGE_GIB \
+            --execution-role-arn arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/ecsTaskExecutionRole \
+            --task-role-arn      arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/ecsTaskRole \
+            --container-definitions "[{
+              \"name\": \"${{ env.CONTAINER_NAME }}\",
+              \"image\": \"$IMAGE\",
+              \"essential\": true,
+              \"logConfiguration\": {
+                \"logDriver\": \"awslogs\",
+                \"options\": {
+                  \"awslogs-group\": \"/ecs/large-file-sorter\",
+                  \"awslogs-region\": \"${{ env.AWS_REGION }}\",
+                  \"awslogs-stream-prefix\": \"dist\",
+                  \"awslogs-create-group\": \"true\"
+                }
+              }
+            }]" \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "task_def_arn=$TASK_DEF_ARN" >> $GITHUB_OUTPUT
+
       # ── Pre-flight: check Fargate vCPU quota ────────────────────────────
       - name: Check Fargate vCPU quota
         run: |
@@ -387,7 +429,7 @@ jobs:
           for attempt in 1 2 3; do
             RESPONSE=$(aws ecs run-task \
               --cluster ${{ env.ECS_CLUSTER }} \
-              --task-definition ${{ steps.register-task.outputs.task_def_arn }} \
+              --task-definition ${{ steps.register-reduce-task.outputs.task_def_arn }} \
               --launch-type FARGATE \
               --network-configuration "awsvpcConfiguration={subnets=[${{ secrets.SUBNET_ID }}],securityGroups=[${{ secrets.SECURITY_GROUP_ID }}],assignPublicIp=ENABLED}" \
               --overrides "{
